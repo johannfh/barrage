@@ -1,179 +1,25 @@
-use bevy::{
-    asset::RenderAssetUsages,
-    input::mouse::MouseWheel,
-    mesh::{Indices, PrimitiveTopology},
-    platform::collections::HashMap,
-    prelude::*,
-    sprite_render::Material2d,
-    window::PrimaryWindow,
-};
+use std::collections::HashMap;
+
+use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::{
+    graphics::create_polygon_mesh,
+    map::{
+        CHUNK_HALF_SIZE, CHUNK_SIZE, CHUNK_SIZE_F32, CHUNK_SIZE_I32, ChunkEntity, FIELD_SIZE, Map,
+    },
     player_camera::{PlayerCamera, PlayerCameraPlugin},
     toasts::{ToastMessage, ToastsPlugin},
+    user_controls::UserControlsPlugin,
 };
 
+mod graphics;
+mod map;
+mod module_loader;
 mod player_camera;
 mod toasts;
+mod user_controls;
 
-const FIELD_SIZE: f32 = 4.0;
-const CHUNK_SIZE: usize = 16;
-const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
-const CHUNK_SIZE_F32: f32 = CHUNK_SIZE as f32;
-const CHUNK_HALF_SIZE: Vec2 = Vec2::splat(CHUNK_SIZE_F32 * FIELD_SIZE / 2.0);
-
-#[derive(Component, Debug, Clone, Copy)]
-struct ChunkEntity {
-    position: IVec2,
-}
-
-struct ChunkData {
-    tiles: [[bool; CHUNK_SIZE]; CHUNK_SIZE],
-}
-
-impl ChunkData {
-    fn new() -> Self {
-        Self {
-            tiles: [[false; CHUNK_SIZE]; CHUNK_SIZE],
-        }
-    }
-
-    fn set(&mut self, local_pos: IVec2, value: bool) {
-        self.tiles[local_pos.x as usize][local_pos.y as usize] = value;
-    }
-}
-
-#[derive(Default, Resource)]
-struct Map {
-    chunks: HashMap<IVec2, ChunkData>,
-}
-
-impl Map {
-    /// Converts global position to chunk position and local position within that chunk.
-    ///
-    /// # Arguments
-    /// * `pos`: The global position as an IVec2.
-    ///
-    /// # Returns
-    /// - `(chunk_pos, local_pos)`: A tuple where `chunk_pos` is the position of the chunk
-    ///   containing the global position, and `local_pos` is the position within that chunk.
-    const fn global_to_chunk(pos: IVec2) -> (IVec2, IVec2) {
-        let chunk_pos = IVec2::new(
-            pos.x.div_euclid(CHUNK_SIZE_I32),
-            pos.y.div_euclid(CHUNK_SIZE_I32),
-        );
-        let local_pos = IVec2::new(
-            pos.x.rem_euclid(CHUNK_SIZE_I32),
-            pos.y.rem_euclid(CHUNK_SIZE_I32),
-        );
-        (chunk_pos, local_pos)
-    }
-
-    const fn chunk_to_global(chunk_pos: IVec2, local_pos: IVec2) -> IVec2 {
-        IVec2::new(
-            chunk_pos.x * CHUNK_SIZE_I32 + local_pos.x,
-            chunk_pos.y * CHUNK_SIZE_I32 + local_pos.y,
-        )
-    }
-
-    fn create_chunk(&mut self, pos: IVec2, commands: &mut Commands) {
-        if self.chunks.insert(pos, ChunkData::new()).is_some() {
-            // for now, we just panic if chunk exists
-            panic!("Chunk at position {:?} already exists!", pos);
-        }
-        commands.spawn(ChunkEntity { position: pos });
-    }
-
-    fn try_place(&mut self, pos: IVec2, occlusion_map: &[IVec2]) -> bool {
-        // check occlusion
-        for offset in occlusion_map {
-            let check_pos = pos + offset;
-            let chunk_pos = IVec2::new(
-                check_pos.x.div_euclid(CHUNK_SIZE_I32),
-                check_pos.y.div_euclid(CHUNK_SIZE_I32),
-            );
-            let local_pos = IVec2::new(
-                check_pos.x.rem_euclid(CHUNK_SIZE_I32),
-                check_pos.y.rem_euclid(CHUNK_SIZE_I32),
-            );
-            if let Some(chunk) = self.chunks.get(&chunk_pos) {
-                if chunk.tiles[local_pos.x as usize][local_pos.y as usize] {
-                    // cannot place, field occupied
-                    return false;
-                } else {
-                    // field is free -> continue checking
-                }
-            } else {
-                // Chunk does not exist -> not loaded yet -> placement fails
-                // TODO: handle error and chunk loading properly
-                return false;
-            }
-        }
-
-        // placement possible
-        for offset in occlusion_map {
-            let place_pos = pos + offset;
-            let chunk_pos = IVec2::new(
-                place_pos.x.div_euclid(CHUNK_SIZE_I32),
-                place_pos.y.div_euclid(CHUNK_SIZE_I32),
-            );
-            let local_pos = IVec2::new(
-                place_pos.x.rem_euclid(CHUNK_SIZE_I32),
-                place_pos.y.rem_euclid(CHUNK_SIZE_I32),
-            );
-            let chunk = self
-                .chunks
-                .get_mut(&chunk_pos)
-                .expect("Chunk must exist here; we checked before");
-            assert!(!chunk.tiles[local_pos.x as usize][local_pos.y as usize]);
-            chunk.tiles[local_pos.x as usize][local_pos.y as usize] = true;
-        }
-        // placement successful
-        true
-    }
-
-    /// Checks if a global position is occupied.
-    /// This returns true if the position is occupied or if the chunk is not loaded.
-    fn is_occupied(&self, chunk_pos: IVec2, local_pos: IVec2) -> bool {
-        if let Some(chunk) = self.chunks.get(&chunk_pos) {
-            chunk.tiles[local_pos.x as usize][local_pos.y as usize]
-        } else {
-            // Chunk does not exist -> not loaded yet -> consider occupied
-            true
-        }
-    }
-}
-
-fn create_polygon_mesh(sides: usize, radius: f32) -> Mesh {
-    let mut vertices = Vec::with_capacity(sides + 1);
-    let mut indices = Vec::with_capacity(sides * 3);
-
-    // Center vertex
-    vertices.push([0.0, 0.0, 0.0]);
-
-    // Outer vertices
-    for i in 0..sides {
-        let angle = i as f32 / sides as f32 * std::f32::consts::TAU;
-        let x = radius * angle.cos();
-        let y = radius * angle.sin();
-        vertices.push([x, y, 0.0]);
-    }
-
-    // Indices for triangles
-    for i in 0..sides {
-        indices.push(0);
-        indices.push((i + 1) as u32);
-        indices.push(((i + 1) % sides + 1) as u32);
-    }
-
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vertices)
-    .with_inserted_indices(Indices::U32(indices))
-}
-
+/// Trait for building construction logic.
 trait BuildingBuilder: Send + Sync + 'static {
     fn build(&self, entry: &BuildingEntry, commands: &mut Commands, position: IVec2);
 }
@@ -373,7 +219,7 @@ fn player_controls(
 fn debug_chunk_bounds(mut gizmos: Gizmos, query: Query<&ChunkEntity>) {
     for chunk in query {
         let chunk_world_pos =
-            chunk.position.as_vec2() * CHUNK_SIZE_F32 * FIELD_SIZE + CHUNK_HALF_SIZE;
+            chunk.position().as_vec2() * CHUNK_SIZE_F32 * FIELD_SIZE + CHUNK_HALF_SIZE;
         gizmos
             .grid_2d(
                 Isometry2d::from_translation(chunk_world_pos),
@@ -397,14 +243,14 @@ fn debug_chunk_fields(
     let color_hover_free = Color::srgba(0.0, 0.3, 1.0, 0.6);
     for chunk in query {
         let chunk_world_pos =
-            chunk.position.as_vec2() * CHUNK_SIZE_F32 * FIELD_SIZE + CHUNK_HALF_SIZE;
+            chunk.position().as_vec2() * CHUNK_SIZE_F32 * FIELD_SIZE + CHUNK_HALF_SIZE;
         for x in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 let field_pos =
                     chunk_world_pos + Vec2::new(x as f32 * FIELD_SIZE, y as f32 * FIELD_SIZE);
-                let color = if map.is_occupied(chunk.position, IVec2::new(x as i32, y as i32)) {
+                let color = if map.is_occupied(chunk.position(), IVec2::new(x as i32, y as i32)) {
                     if let Some((cursor_chunk_pos, cursor_local_pos)) = cursor.grid_position()
-                        && cursor_chunk_pos == chunk.position
+                        && cursor_chunk_pos == chunk.position()
                         && cursor_local_pos == IVec2::new(x as i32, y as i32)
                     {
                         color_hover_occupied
@@ -413,7 +259,7 @@ fn debug_chunk_fields(
                     }
                 } else {
                     if let Some((cursor_chunk_pos, cursor_local_pos)) = cursor.grid_position()
-                        && cursor_chunk_pos == chunk.position
+                        && cursor_chunk_pos == chunk.position()
                         && cursor_local_pos == IVec2::new(x as i32, y as i32)
                     {
                         color_hover_free
@@ -441,7 +287,12 @@ pub enum AppState {
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, PlayerCameraPlugin, ToastsPlugin))
+        .add_plugins((
+            DefaultPlugins,
+            PlayerCameraPlugin,
+            ToastsPlugin,
+            UserControlsPlugin,
+        ))
         .init_resource::<Map>()
         .init_resource::<BuildingRegistry>()
         .init_resource::<CursorBuilding>()
